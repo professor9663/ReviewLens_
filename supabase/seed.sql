@@ -1,0 +1,1 @@
+-- No real customer data is included. Load sample data from the application so each user owns their copy.
