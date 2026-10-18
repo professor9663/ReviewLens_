@@ -8,7 +8,8 @@ All workspace endpoints require a valid Supabase Auth session cookie. APIs retur
 | --- | --- |
 | `GET /api/datasets` | List the signed-in user's datasets. |
 | `POST /api/datasets` | Create an empty dataset or set `sample: true` to load synthetic rows. Body: `{name, description?, sample?}`. |
-| `POST /api/datasets/import` | Multipart CSV upload. Fields: `file`, `name`, `description`, and optional JSON `mapping`. |
+| `POST /api/datasets/import/start` | Create an authenticated, path-scoped signed upload for a CSV. JSON: `{filename, fileSize}`; returns the resumable Storage endpoint, object path, and upload token. |
+| `POST /api/datasets/import` | Finalize a CSV import after the direct Supabase Storage upload. JSON: `{name, description, filename, fileSize, storagePath, mapping}`. The source file remains private. |
 | `GET /api/datasets/{id}` | Read a dataset (storage path is never returned). |
 | `PATCH /api/datasets/{id}` | Update `name` and/or `description`. |
 | `DELETE /api/datasets/{id}` | Delete dataset, review rows, and original file. Saved summary metadata is retained. |
@@ -37,7 +38,7 @@ The JSON format is `reviewlens.export.v1` and contains generation time, scope, d
 
 - `401`: no current authenticated user.
 - `404`: invalid ID or a resource not visible to the current user.
-- `413`: the export matches more than the supported 10,000-row limit.
+- `413`: the CSV import exceeds 1,000,000 data rows, or an export matches more than the supported 10,000-row limit.
 - `503`: required Supabase environment variables are missing.
 - `429`: the current process has reached a best-effort per-user limit (10 uploads per 10 minutes, 20 analyses per hour, or 60 exports per hour); `Retry-After` gives a wait in seconds.
 - `500`: storage/database operation failed. Error responses do not expose credentials or query text.

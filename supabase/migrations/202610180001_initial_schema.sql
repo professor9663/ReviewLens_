@@ -134,8 +134,8 @@ create policy "reports own records" on public.reports for all using (user_id = (
 
 -- Original uploads remain private. Object paths are prefixed with the authenticated user UUID.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('reviewlens-private', 'reviewlens-private', false, 5242880, array['text/csv', 'application/vnd.ms-excel', 'text/plain'])
-on conflict (id) do update set public = false, file_size_limit = 5242880;
+values ('reviewlens-private', 'reviewlens-private', false, 104857600, array['text/csv', 'application/vnd.ms-excel', 'text/plain'])
+on conflict (id) do update set public = false, file_size_limit = 104857600;
 
 create policy "owners manage private review files" on storage.objects for all using (
   bucket_id = 'reviewlens-private' and (storage.foldername(name))[1] = (select auth.uid())::text

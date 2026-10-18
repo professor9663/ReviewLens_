@@ -32,5 +32,8 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     }).select("id,dataset_id,dataset_name,algorithm_version,total_reviews,positive_count,neutral_count,negative_count,average_rating,summary,created_at").single();
     if (runError || !run) return jsonError("Analysis was calculated, but its history could not be saved.", 500);
     return Response.json({ run }, { status: 201 });
-  } catch (error) { return jsonError(error instanceof Error && error.message.includes("10,000") ? error.message : "Could not analyse this dataset.", 500); }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("10,000")) return jsonError(error.message, 413);
+    return jsonError("Could not analyse this dataset.", 500);
+  }
 }

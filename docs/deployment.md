@@ -5,8 +5,8 @@ ReviewLens needs a Next.js server runtime and a Supabase project. Do not deploy 
 ## 1. Prepare Supabase
 
 1. Create a Supabase project and save its URL, anon key, and project reference.
-2. From the repository, run `npx supabase login`, `npx supabase link --project-ref YOUR_PROJECT_REF`, then `npx supabase db push`; alternatively apply the migration in the Supabase SQL Editor.
-3. Confirm `reviewlens-private` exists under Storage and its Public setting is off. The migration sets the file cap to 5 MB and adds user-folder ownership policies.
+2. From the repository, run `npx supabase login`, `npx supabase link --project-ref YOUR_PROJECT_REF`, then `npx supabase db push`; alternatively apply both migrations in the Supabase SQL Editor.
+3. Confirm `reviewlens-private` exists under Storage and its Public setting is off. The migration sets the bucket cap to 100 MB and adds user-folder ownership policies. The Supabase project-wide Storage limit must also be at least 100 MB; Supabase Free projects currently cap individual files at 50 MB, so 100 MB uploads require a plan with a higher limit and a project-wide limit change.
 4. Under **Authentication → URL Configuration**, set the production Site URL to your final app origin, for example `https://reviewlens.example.com`.
 5. Add `https://reviewlens.example.com/auth/callback` to the redirect URL allowlist. Keep the local callback URL for development if needed.
 6. Configure an email provider/SMTP for confirmation and reset emails. If you disable email confirmation for a presentation, document that change and restore suitable controls for production use.

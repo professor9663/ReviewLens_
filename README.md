@@ -60,7 +60,9 @@ Authenticated workspace: `/dashboard`, `/reviews`, `/sentiment`, `/products`, `/
 
 ## Import and analysis
 
-CSV uploads are capped at 5 MB and 10,000 data rows. Review text columns named `review`, `review_text`, or `text` are detected case-insensitively. Common rating, date, and product aliases are mapped automatically; users can adjust mappings and preview the first rows. Blank review rows are skipped, invalid ratings/dates become missing values, and the original file is kept in private storage.
+CSV uploads are capped at 100 MB and 1,000,000 data rows. The server streams the CSV and inserts reviews in batches to avoid holding every parsed row in memory. Review text columns named `review`, `review_text`, or `text` are detected case-insensitively. Common rating, date, and product aliases are mapped automatically; users can adjust mappings and preview the first rows. Blank review rows are skipped, invalid ratings/dates become missing values, and the original file is kept in private storage. Supabase's project-wide Storage limit must allow files of at least 100 MB; the Free plan may have a lower limit.
+
+Dataset analytics, re-analysis, and exports currently have a separate 10,000-review per-operation limit. Review listing remains paginated, so larger imported datasets can still be browsed.
 
 Sentiment uses `lexicon-1.0`: tokenize Unicode words, count positive and negative dictionary matches, and reverse a matched term if `not`, `never`, `no`, or a listed negator appears in the previous three tokens. The larger count chooses Positive or Negative; a tie is Neutral. Scores are match counts, not confidence. Sarcasm, context, spelling errors, slang, and complex negation are known limitations. See [the viva guide](docs/viva-guide.md).
 
@@ -97,7 +99,7 @@ Unit tests cover sentiment rules, metrics, CSV header mapping, quoted content, a
 
 - **Workspace asks to connect Supabase:** Check `.env.local`, restart the dev server, and verify the URL/key pair.
 - **Login redirects or confirmation links fail:** Add the exact local or production `/auth/callback` URL to Supabase Auth redirect allowlist and configure Site URL.
-- **CSV original does not upload:** Apply the migration and confirm `reviewlens-private` exists and is private. The bucket enforces a 5 MB limit.
+- **CSV original does not upload:** Apply the migrations and confirm `reviewlens-private` exists and is private. The bucket limit is 100 MB, and the Supabase project-wide Storage limit must also allow at least 100 MB.
 - **A CSV column was not detected:** Use the mapping controls and map the review text explicitly. Accepted text aliases include `comment`, `feedback`, and `content` as well as `review`, `review_text`, and `text`.
 - **Email confirmation does not arrive:** Configure SMTP in Supabase Auth. For a local academic demo, you may disable confirmation in the Supabase Auth provider settings, understanding that this changes the verification behavior.
 - **PDF contains only the first 60 review texts:** The PDF keeps the report concise; CSV, Excel, and JSON include the full selected scope.

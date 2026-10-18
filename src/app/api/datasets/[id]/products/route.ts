@@ -10,5 +10,8 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     if (auth.response) return auth.response;
     const rows = await readAllReviews(auth.supabase, id);
     return Response.json({ products: productMetrics(rows as never) });
-  } catch { return jsonError("Could not calculate product summaries.", 500); }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("10,000")) return jsonError(error.message, 413);
+    return jsonError("Could not calculate product summaries.", 500);
+  }
 }

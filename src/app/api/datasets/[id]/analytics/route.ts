@@ -18,5 +18,8 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     const { data: latestRun } = await auth.supabase.from("analysis_runs").select("id,algorithm_version,created_at").eq("dataset_id", id).order("created_at", { ascending: false }).limit(1).maybeSingle();
     const { data: recentRuns } = await auth.supabase.from("analysis_runs").select("id,dataset_id,dataset_name,algorithm_version,total_reviews,created_at").eq("dataset_id", id).order("created_at", { ascending: false }).limit(5);
     return Response.json({ dataset, summary, products, keywords, recentReviews, latestRun, recentRuns: recentRuns ?? [] });
-  } catch { return jsonError("Could not calculate dataset analytics.", 500); }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("10,000")) return jsonError(error.message, 413);
+    return jsonError("Could not calculate dataset analytics.", 500);
+  }
 }

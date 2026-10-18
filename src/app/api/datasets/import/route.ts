@@ -1,56 +1,141 @@
+import { Readable } from "node:stream";
+import Papa from "papaparse";
 import { z } from "zod";
 import { analyzeSentiment } from "@/lib/analysis/sentiment";
-import { parseCsvText, MAX_FILE_BYTES } from "@/lib/import/csv";
+import { MAX_FILE_BYTES, MAX_ROWS, mapCsvReview, resolveMapping } from "@/lib/import/csv";
 import { authenticatedClient, jsonError } from "@/lib/http";
-import { checkRateLimit } from "@/lib/rate-limit";
+
+export const runtime = "nodejs";
+export const maxDuration = 300;
 
 const nameSchema = z.string().trim().min(1).max(120);
+const mappingSchema = z.object({
+  review_text: z.string().min(1),
+  rating: z.string().nullable(),
+  review_date: z.string().nullable(),
+  product_name: z.string().nullable()
+});
+const requestSchema = z.object({
+  name: nameSchema,
+  description: z.string().trim().max(1000),
+  filename: z.string().min(1).max(255).refine((value) => value.toLowerCase().endsWith(".csv")),
+  fileSize: z.number().int().positive().max(MAX_FILE_BYTES),
+  storagePath: z.string().min(1).max(500),
+  mapping: mappingSchema
+});
+
+const INSERT_BATCH_ROWS = 1000;
+const INSERT_BATCH_BYTES = 1_000_000;
+
+async function removeUploadedFile(supabase: NonNullable<Awaited<ReturnType<typeof authenticatedClient>>["supabase"]>, path: string) {
+  await supabase.storage.from("reviewlens-private").remove([path]);
+}
 
 export async function POST(request: Request) {
   try {
     const auth = await authenticatedClient();
     if (auth.response) return auth.response;
-    const limit = checkRateLimit(`import:${auth.user.id}`, 10, 10 * 60 * 1000);
-    if (!limit.allowed) return Response.json({ error: "Import limit reached. Try again later." }, { status: 429, headers: { "Retry-After": String(limit.retryAfter) } });
-    const form = await request.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) return jsonError("Choose a CSV file to import.");
-    if (file.size > MAX_FILE_BYTES) return jsonError("CSV files must be 5 MB or smaller.");
-    if (!file.name.toLowerCase().endsWith(".csv") || (file.type && !["text/csv", "text/plain", "application/vnd.ms-excel", "application/octet-stream"].includes(file.type))) return jsonError("Upload a CSV file.");
-    const name = nameSchema.safeParse(form.get("name"));
-    if (!name.success) return jsonError("Enter a dataset name up to 120 characters.");
-    const description = z.string().trim().max(1000).safeParse(form.get("description") ?? "");
-    if (!description.success) return jsonError("Description must be 1,000 characters or fewer.");
-    let mapping: Record<string, string | null> | undefined;
-    const rawMapping = form.get("mapping");
-    if (typeof rawMapping === "string") { try { mapping = JSON.parse(rawMapping); } catch { return jsonError("Column mapping is invalid."); } }
-    const text = await file.text();
-    let parsed;
-    try { parsed = parseCsvText(text, mapping); } catch (error) { return jsonError(error instanceof Error ? error.message : "Could not parse this CSV."); }
-    if (!parsed.rows.length) return jsonError("No non-empty review rows were found.");
-    const { data: dataset, error: datasetError } = await auth.supabase.from("datasets").insert({ user_id: auth.user.id, name: name.data, description: description.data, source_type: "upload", original_filename: file.name, row_count: 0 }).select("id,name,description,source_type,original_filename,created_at").single();
-    if (datasetError || !dataset) return jsonError("Could not create the dataset.", 500);
-    const safeFilename = file.name.replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(-120) || "reviews.csv";
-    const storagePath = `${auth.user.id}/${dataset.id}/${Date.now()}-${safeFilename}`;
-    const { error: uploadError } = await auth.supabase.storage.from("reviewlens-private").upload(storagePath, await file.arrayBuffer(), { contentType: "text/csv", upsert: false });
-    if (uploadError) { await auth.supabase.from("datasets").delete().eq("id", dataset.id); return jsonError("Could not securely store the original CSV. Check that the private storage bucket migration is applied.", 500); }
-    const { error: pathError } = await auth.supabase.from("datasets").update({ storage_path: storagePath }).eq("id", dataset.id);
-    if (pathError) { await auth.supabase.storage.from("reviewlens-private").remove([storagePath]); await auth.supabase.from("datasets").delete().eq("id", dataset.id); return jsonError("Could not save the uploaded file reference.", 500); }
-    const rows = parsed.rows.map((row) => ({ ...row, ...analyzeSentiment(row.review_text), dataset_id: dataset.id, user_id: auth.user.id }));
-    for (let offset = 0; offset < rows.length; offset += 500) {
-      const { error } = await auth.supabase.from("reviews").insert(rows.slice(offset, offset + 500));
-      if (error) {
-        await auth.supabase.from("datasets").delete().eq("id", dataset.id);
-        await auth.supabase.storage.from("reviewlens-private").remove([storagePath]);
-        return jsonError("Import could not be completed. The partial dataset and upload were removed.", 500);
+
+    const body = await request.json();
+    const input = requestSchema.safeParse(body);
+    if (!input.success) return jsonError("Import details are invalid. Check the file size, name, and column mapping.");
+
+    const { name, description, filename, fileSize, mapping } = input.data;
+    const storagePath = input.data.storagePath;
+    const pathParts = storagePath.split("/");
+    const datasetId = pathParts[1];
+    if (pathParts.length !== 3 || pathParts[0] !== auth.user.id || !pathParts[2] || !z.string().uuid().safeParse(datasetId).success) {
+      return jsonError("The uploaded file does not belong to your account.", 403);
+    }
+
+    const { data: file, error: downloadError } = await auth.supabase.storage.from("reviewlens-private").download(storagePath);
+    if (downloadError || !file) {
+      await removeUploadedFile(auth.supabase, storagePath);
+      return jsonError("Could not read the uploaded CSV from private storage. Retry the upload.", 400);
+    }
+    if (file.size !== fileSize || file.size > MAX_FILE_BYTES) {
+      await removeUploadedFile(auth.supabase, storagePath);
+      return jsonError("The uploaded file size does not match or exceeds the 100 MB limit.", 413);
+    }
+
+    const { data: dataset, error: datasetError } = await auth.supabase.from("datasets").insert({
+      id: datasetId,
+      user_id: auth.user.id,
+      name,
+      description,
+      source_type: "upload",
+      original_filename: filename,
+      storage_path: storagePath,
+      row_count: 0
+    }).select("id,name,description,source_type,original_filename,created_at").single();
+    if (datasetError || !dataset) {
+      await removeUploadedFile(auth.supabase, storagePath);
+      return jsonError("Could not create the dataset. Retry the import.", 500);
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    let parsedRows = 0;
+    let headers: string[] = [];
+    let batch: Record<string, unknown>[] = [];
+    let batchBytes = 0;
+    const rollback = async () => {
+      try { await auth.supabase.from("datasets").delete().eq("id", dataset.id); } catch { /* best-effort rollback */ }
+      try { await removeUploadedFile(auth.supabase, storagePath); } catch { /* best-effort cleanup */ }
+    };
+
+    try {
+      const parser = Papa.parse(Papa.NODE_STREAM_INPUT, { header: true, skipEmptyLines: "greedy", dynamicTyping: false });
+      const source = Readable.from(file.stream() as AsyncIterable<Uint8Array>);
+      source.on("error", (error) => parser.destroy(error));
+      source.pipe(parser);
+
+      const flushBatch = async () => {
+        if (!batch.length) return;
+        const { error } = await auth.supabase.from("reviews").insert(batch);
+        if (error) throw new Error("The database rejected a batch of review rows.");
+        imported += batch.length;
+        batch = [];
+        batchBytes = 0;
+      };
+
+      for await (const raw of parser) {
+        if (parsedRows >= MAX_ROWS) throw new Error(`A dataset can contain at most ${MAX_ROWS.toLocaleString()} rows.`);
+        parsedRows++;
+        const record = raw as Record<string, string>;
+        if (!headers.length) {
+          headers = Object.keys(record);
+          resolveMapping(headers, mapping);
+        }
+        const row = mapCsvReview(record, mapping);
+        if (!row) {
+          skipped++;
+          continue;
+        }
+        const insertRow = { ...row, ...analyzeSentiment(row.review_text), dataset_id: dataset.id, user_id: auth.user.id };
+        const rowBytes = Buffer.byteLength(JSON.stringify(insertRow), "utf8");
+        if (batch.length && (batch.length >= INSERT_BATCH_ROWS || batchBytes + rowBytes > INSERT_BATCH_BYTES)) await flushBatch();
+        batch.push(insertRow);
+        batchBytes += rowBytes;
+        if (batch.length >= INSERT_BATCH_ROWS || batchBytes >= INSERT_BATCH_BYTES) await flushBatch();
       }
+
+      if (!headers.length) throw new Error("No non-empty review rows were found.");
+      await flushBatch();
+      if (!imported) throw new Error("No non-empty review rows were found.");
+
+      const { error: updateError } = await auth.supabase.from("datasets").update({ row_count: imported }).eq("id", dataset.id);
+      if (updateError) throw new Error("Could not finish the import; please retry.");
+      return Response.json({ dataset: { ...dataset, row_count: imported }, imported, skipped, errors: [] }, { status: 201 });
+    } catch (error) {
+      await rollback();
+      const message = error instanceof Error ? error.message : "Could not parse this CSV.";
+      if (message.includes("database rejected") || message.includes("finish the import")) {
+        return jsonError("Import could not be completed. The partial dataset was removed; retry the import.", 500);
+      }
+      return jsonError(message, message.includes("at most") ? 413 : 400);
     }
-    const { error: updateError } = await auth.supabase.from("datasets").update({ row_count: rows.length }).eq("id", dataset.id);
-    if (updateError) {
-      await auth.supabase.from("datasets").delete().eq("id", dataset.id);
-      await auth.supabase.storage.from("reviewlens-private").remove([storagePath]);
-      return jsonError("Could not finish the import. The partial dataset and upload were removed.", 500);
-    }
-    return Response.json({ dataset: { ...dataset, row_count: rows.length }, imported: rows.length, skipped: parsed.skipped, errors: parsed.errors }, { status: 201 });
-  } catch { return jsonError("Supabase is not configured. Follow README setup before using the workspace.", 503); }
+  } catch {
+    return jsonError("The CSV could not be finalized. Retry the import from the dataset page.", 500);
+  }
 }
