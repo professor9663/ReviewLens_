@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import Papa from "papaparse";
 import { z } from "zod";
 import { analyzeSentiment } from "@/lib/analysis/sentiment";
@@ -86,7 +87,7 @@ export async function POST(request: Request) {
 
     try {
       const parser = Papa.parse(Papa.NODE_STREAM_INPUT, { header: true, skipEmptyLines: "greedy", dynamicTyping: false });
-      const source = Readable.from(file.stream() as AsyncIterable<Uint8Array>);
+      const source = Readable.fromWeb(file.stream() as unknown as NodeReadableStream<Uint8Array>);
       source.on("error", (error) => parser.destroy(error));
       source.pipe(parser);
 
